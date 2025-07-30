@@ -6,6 +6,7 @@
 #include <linux/proc_fs.h>
 #include <linux/mutex.h>
 #include <linux/seq_file.h>
+#include <linux/timekeeping.h>
 
 #define AUTHOR "Burak Ozter"
 #define DESCRIPTION "USB Activity Monitor Kernel Module"
@@ -28,6 +29,8 @@ struct usb_device_info
     char product[MAX_STRING_LENGTH];
     char serial[MAX_STRING_LENGTH];
     bool is_connected;
+    struct timespec64 added_time;
+    struct timespec64 removed_time;
 };
 
 static int find_device_in_array(int bus_num, int dev_num)
@@ -91,6 +94,9 @@ static int add_device_to_array(struct usb_device *device)
         {
             strcpy(usb_devices_array[index].serial, "Unknown");
         }
+        ktime_get_real_ts64(&usb_devices_array[index].added_time);
+        usb_devices_array[index].removed_time.tv_sec = 0;
+        usb_devices_array[index].removed_time.tv_nsec = 0;
         device_count++;
         mutex_unlock(&rw_mutex);
         return index;
@@ -113,6 +119,7 @@ static void remove_device_from_array(int bus_num, int dev_num)
         if (index >= 0)
         {
             usb_devices_array[index].is_connected = false;
+            ktime_get_real_ts64(&usb_devices_array[index].removed_time);
         }
         mutex_unlock(&rw_mutex);
     }
@@ -189,6 +196,11 @@ static int usb_devices_show(struct seq_file *m, void *v)
                    usb_devices_array[i].product);
         seq_printf(m, "  Serial: %s\n",
                    usb_devices_array[i].serial);
+        seq_printf(m, "  Added: %lld.%09lu\n",
+                   (long long)usb_devices_array[i].added_time.tv_sec, usb_devices_array[i].added_time.tv_nsec);
+        if (!usb_devices_array[i].is_connected)
+            seq_printf(m, "  Removed: %lld.%09lu\n",
+                       (long long)usb_devices_array[i].removed_time.tv_sec, usb_devices_array[i].removed_time.tv_nsec);
         seq_printf(m, "  Status: %s\n\n",
                    usb_devices_array[i].is_connected ? "\033[32mConnected\033[0m" : "\033[31mDisconnected\033[0m");
     }
