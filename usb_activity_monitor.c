@@ -17,7 +17,7 @@ static struct proc_dir_entry *proc_file;
 static struct usb_device_info *usb_devices_array;
 static int device_count = 0;
 #define MAX_USB_DEVICES 100
-#define MAX_STRING_LENGTH 256
+#define MAX_STRING_LENGTH 255
 struct usb_device_info
 {
     int bus_num;
@@ -237,35 +237,43 @@ static int list_usb_devices(void)
     return 0;
 }
 
-// TODO: error handling
-static int __init usb_activity_monitor_init(void)
+static int init_procfs(void)
 {
-    printk(KERN_INFO PROC_FILENAME ": Init usb_activity_monitor module\n");
-    int err;
-
     proc_file = proc_create(PROC_FILENAME, 0644, NULL, &usb_activity_monitor_proc_fops);
     if (NULL == proc_file)
     {
         printk(KERN_ERR PROC_FILENAME ": Could not initialize /proc/%s\n. Aborting..", PROC_FILENAME);
-        kfree(usb_devices_array);
         return -ENOMEM;
     }
+    return 0;
+}
+
+static int init_usb_devices_array(void)
+{
     usb_devices_array = kmalloc_array(MAX_USB_DEVICES, sizeof(struct usb_device_info), GFP_KERNEL);
     if (!usb_devices_array)
     {
         printk(KERN_ERR PROC_FILENAME ": Failed to allocate memory for USB devices array\n");
-        goto out;
+        return -1;
     }
-
-    // Initialize array
     memset(usb_devices_array, 0, MAX_USB_DEVICES * sizeof(struct usb_device_info));
     device_count = 0;
+    return 0;
+}
+
+static int __init usb_activity_monitor_init(void)
+{
+    printk(KERN_INFO PROC_FILENAME ": Init usb_activity_monitor module\n");
+    int err;
+    err = init_procfs();
+    if (err)
+        goto out;
+    err = init_usb_devices_array();
+    if (err)
+        goto out;
     err = list_usb_devices();
     if (err)
-    {
-        printk(KERN_ERR PROC_FILENAME ": Error initializing usb_activity_monitor kernel module.\n");
         goto out;
-    }
     usb_register_notify(&usb_notifier_block);
     return 0;
 out:
