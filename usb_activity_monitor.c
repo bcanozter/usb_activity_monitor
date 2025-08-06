@@ -15,7 +15,20 @@
 
 static DEFINE_MUTEX(rw_mutex);
 static struct proc_dir_entry *proc_file;
+// whitelist of usb devices
+static struct usb_device_id whitelist[] = {
+    {USB_DEVICE(0xffff, 0x5678)},
+    {}};
+
+// Any usb device
+static struct usb_device_id usb_id_table[] = {
+    {.driver_info = 42},
+    {}};
+
+MODULE_DEVICE_TABLE(usb, usb_id_table);
+
 #define MAX_STRING_LENGTH 256
+
 struct usb_device_info
 {
     int bus_num;
@@ -71,6 +84,21 @@ static struct usb_device_info *find_device_in_list(int bus_num, int device_num)
     return NULL;
 }
 
+// This only checks whether both idVendor and idProduct is identical.
+//  This will change.
+static bool is_device_in_whitelist(const struct usb_device *device)
+{
+    for (int i = 0; i < ARRAY_SIZE(whitelist); i++)
+    {
+        // printk(KERN_DEBUG "VID:PID = 0x%04x:0x%04x\n", le16_to_cpu(device->descriptor.idVendor), le16_to_cpu(device->descriptor.idProduct));
+        if ((whitelist[i].idVendor == device->descriptor.idVendor) && (whitelist[i].idProduct == device->descriptor.idProduct))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void add_usb_device(struct usb_device *device)
 {
     struct usb_device_info *new_device = kmalloc(sizeof(struct usb_device_info), GFP_KERNEL);
@@ -116,50 +144,51 @@ static void add_usb_device(struct usb_device *device)
 // Mark device as disconnected and set removal time
 static void disconnect_usb_device(int bus_num, int device_num)
 {
-    struct usb_device_info *dev = find_device_in_list(bus_num, device_num);
-    if (dev && dev->is_connected)
+    struct usb_device_info *device = find_device_in_list(bus_num, device_num);
+    if (device && device->is_connected)
     {
-        dev->is_connected = false;
-        ktime_get_real_ts64(&dev->removed_time);
+        device->is_connected = false;
+        ktime_get_real_ts64(&device->removed_time);
     }
 }
 
-static int print_usb_device_info(struct usb_device *device)
+static void print_usb_device_info(struct usb_device *device)
 {
-    if (device)
-    {
-        printk(KERN_INFO "USB Device: Bus %03d Device %03d: VID:PID = 0x%04x:0x%04x\n",
-               device->bus ? device->bus->busnum : -1,
-               device->devnum,
-               le16_to_cpu(device->descriptor.idVendor),
-               le16_to_cpu(device->descriptor.idProduct));
 
-        if (device->manufacturer)
-            printk(KERN_INFO "   Manufacturer: %s\n", device->manufacturer);
-        if (device->product)
-            printk(KERN_INFO "   Product: %s\n", device->product);
-        if (device->serial)
-            printk(KERN_INFO "   Serial Number: %s\n", device->serial);
-        return 0;
-    }
-    return -1;
+    printk(KERN_INFO PROC_FILENAME ": Bus %03d Device %03d: VID:PID = 0x%04x:0x%04x\n",
+           device->bus ? device->bus->busnum : -1,
+           device->devnum,
+           le16_to_cpu(device->descriptor.idVendor),
+           le16_to_cpu(device->descriptor.idProduct));
+
+    if (device->manufacturer)
+        printk(KERN_INFO "   Manufacturer: %s\n", device->manufacturer);
+    if (device->product)
+        printk(KERN_INFO "   Product: %s\n", device->product);
+    if (device->serial)
+        printk(KERN_INFO "   Serial Number: %s\n", device->serial);
 }
 
 static int usb_notifier_callback(struct notifier_block *self,
                                  unsigned long action, void *dev)
 {
-    struct usb_device *udev = dev;
+    struct usb_device *device = dev;
+    if (!is_device_in_whitelist(device))
+    {
+        printk(KERN_WARNING PROC_FILENAME ": USB device(VID:PID = 0x%04x:0x%04x) is not in whitelist.\n", le16_to_cpu(device->descriptor.idVendor), le16_to_cpu(device->descriptor.idProduct));
+        return -1;
+    }
     switch (action)
     {
     case USB_DEVICE_ADD:
         printk(KERN_WARNING PROC_FILENAME ": USB device has been added.\n");
-        print_usb_device_info(udev);
-        add_usb_device(udev);
+        print_usb_device_info(device);
+        add_usb_device(device);
         break;
     case USB_DEVICE_REMOVE:
         printk(KERN_WARNING PROC_FILENAME ": USB device has been removed.\n");
-        print_usb_device_info(udev);
-        disconnect_usb_device(udev->bus ? udev->bus->busnum : -1, udev->devnum);
+        print_usb_device_info(device);
+        disconnect_usb_device(device->bus ? device->bus->busnum : -1, device->devnum);
         break;
     }
     return NOTIFY_OK;
@@ -214,12 +243,18 @@ static const struct proc_ops usb_activity_monitor_proc_fops = {
 
 static int usb_for_each_dev_callback(struct usb_device *device, void *ptr)
 {
-    int err = print_usb_device_info(device);
-    if (err)
+    if (device)
     {
-        return err;
+        if (!is_device_in_whitelist(device))
+        {
+            printk(KERN_WARNING PROC_FILENAME ": USB device(VID:PID = 0x%04x:0x%04x) is not in whitelist.\n", le16_to_cpu(device->descriptor.idVendor), le16_to_cpu(device->descriptor.idProduct));
+        }
+        else
+        {
+            print_usb_device_info(device);
+            add_usb_device(device);
+        }
     }
-    add_usb_device(device);
     return 0;
 }
 
@@ -247,10 +282,40 @@ static int init_procfs(void)
     return 0;
 }
 
+static int usb_probe(struct usb_interface *interface, const struct usb_device_id *id)
+{
+    struct usb_device *device = interface_to_usbdev(interface);
+    if (!is_device_in_whitelist(device))
+    {
+        printk(KERN_WARNING PROC_FILENAME ": USB device(VID:PID = 0x%04x:0x%04x) is not in whitelist.\n", le16_to_cpu(device->descriptor.idVendor), le16_to_cpu(device->descriptor.idProduct));
+        return -ENODEV;
+    }
+    return 0;
+}
+
+static void usb_disconnect(struct usb_interface *interface)
+{
+    return;
+}
+
+static struct usb_driver _usb_driver =
+    {
+        .name = "usb_driver",
+        .id_table = usb_id_table,
+        .probe = usb_probe,
+        .disconnect = usb_disconnect,
+};
+
 static int __init usb_activity_monitor_init(void)
 {
     printk(KERN_INFO PROC_FILENAME ": Init usb_activity_monitor module\n");
     int err;
+    err = usb_register(&_usb_driver);
+    if (err)
+    {
+        printk(KERN_ERR PROC_FILENAME ": Failed to register usb_id_table.\n");
+        goto out;
+    }
     err = init_procfs();
     if (err)
         goto out;
@@ -265,6 +330,7 @@ out:
         proc_remove(proc_file);
         proc_file = NULL;
     }
+    usb_deregister(&_usb_driver);
     return err;
 }
 
@@ -277,6 +343,7 @@ static void __exit usb_activity_monitor_exit(void)
         proc_file = NULL;
     }
     usb_unregister_notify(&usb_notifier_block);
+    usb_deregister(&_usb_driver);
 }
 
 module_init(usb_activity_monitor_init);
